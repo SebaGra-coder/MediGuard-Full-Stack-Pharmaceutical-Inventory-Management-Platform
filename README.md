@@ -1,106 +1,151 @@
-# 🏥 MediGuard
+# MediGuard
 
-Piattaforma per la gestione dell'inventario farmaceutico domestico con supporto IoT.
+MediGuard is a full-stack application for managing household medication inventories and therapeutic plans, with caregiver support, web push notifications, and IoT integration.
 
-## 🚀 Prerequisiti
+The project combines a Next.js application, a PostgreSQL database, Prisma ORM, and a Docker-based runtime.
 
-Per avviare il progetto su qualsiasi computer, assicurati di avere installati:
+## Features
 
-1.  **Node.js** (v18 o superiore) - [Scarica qui](https://nodejs.org/)
-2.  **Git** - [Scarica qui](https://git-scm.com/)
-3.  **Docker Desktop** (Necessario per il database locale) - [Scarica qui](https://www.docker.com/products/docker-desktop/)
+- **Medication inventory:** manage medicines, quantities, expiration dates, and stored medication records.
+- **Therapy management:** organize therapeutic plans, dosage information, schedules, and recorded administrations.
+- **Caregiver relationships:** connect caregivers and assisted users, with permission-aware access to shared information.
+- **Medication and allergy data:** search the medication catalogue and manage user allergy information.
+- **Web push notifications:** browser subscriptions and push notifications for application reminders.
+- **IoT integration:** API endpoints for device synchronization and confirmation workflows.
+
+## Technology stack
+
+| Area | Technologies |
+| --- | --- |
+| Frontend and application framework | Next.js 16, React 19 |
+| Backend | Next.js Route Handlers |
+| Database | PostgreSQL 15 |
+| ORM and migrations | Prisma 5 |
+| Styling | Tailwind CSS 4, CSS Modules |
+| Authentication | JSON Web Tokens, bcryptjs |
+| Notifications | Web Push |
+| Runtime and packaging | Docker, Docker Compose, Node.js 20 |
+
+## Architecture
+
+The application is organized around three main services:
+
+- **Next.js application:** serves the user interface and backend API routes.
+- **PostgreSQL:** stores users, medication inventory, therapies, caregiver relationships, allergies, and notification subscriptions.
+- **Prisma:** provides database access and applies the versioned migrations in `prisma/migrations`.
+
+Docker Compose starts the application and database together. PostgreSQL data is persisted in the named `postgres_data` volume.
+
+## Requirements
+
+- Docker Engine and Docker Compose (Docker Desktop is suitable on Windows and macOS).
+- Git, to clone the repository.
+
+## Getting started
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/SebaGra-coder/MediGuard-Full-Stack-Pharmaceutical-Inventory-Management-Platform.git
+cd MediGuard-Full-Stack-Pharmaceutical-Inventory-Management-Platform
+```
+
+### 2. Configure environment variables
+
+Create the Compose environment file and the application environment file from the example:
+
+```bash
+cp .env.example .env
+cp .env.example .env.docker
+```
+
+On Windows PowerShell, use:
+
+```powershell
+Copy-Item .env.example .env
+Copy-Item .env.example .env.docker
+```
+
+Set your own values for the database password, JWT secret, and VAPID keys. In `.env.docker`, set the database host in `DATABASE_URL` to the Compose service name `postgres` (rather than `localhost`), because the application connects to PostgreSQL over the Docker network.
+
+Do not commit `.env` or `.env.docker`. The committed `.env.example` contains placeholders only.
+
+### 3. Build and start the application
+
+```bash
+docker compose up --build -d
+```
+
+The application will be available at:
+
+- http://localhost:3000
+
+### 4. Apply database migrations
+
+After the containers are running, apply the migrations included in the repository:
+
+```bash
+docker compose exec app npx prisma migrate deploy
+```
+
+### 5. Load the initial catalogue data
+
+The repository includes CSV data files and a Prisma seed script. To import the initial medication and allergen data, run:
+
+```bash
+docker compose exec app node prisma/seed.js
+```
+
+### Useful Docker commands
+
+| Command | Description |
+| --- | --- |
+| `docker compose ps` | Show the application and database containers. |
+| `docker compose logs -f app` | Follow application logs. |
+| `docker compose logs -f postgres` | Follow PostgreSQL logs. |
+| `docker compose down` | Stop and remove containers while preserving the database volume. |
+| `docker compose down -v` | Stop containers and delete the database volume and its data. |
+
+## Repository structure
+
+```text
+.
+├── prisma/
+│   ├── migrations/
+│   ├── schema.prisma
+│   ├── seed.js
+│   └── *.csv
+├── public/
+├── src/
+│   ├── app/
+│   │   └── api/
+│   ├── components/
+│   ├── hooks/
+│   └── lib/
+├── .dockerignore
+├── .env.example
+├── docker-compose.yml
+├── Dockerfile
+├── package.json
+└── README.md
+```
+
+## Development
+
+For local development outside Docker, install the dependencies with `npm ci`, configure a `DATABASE_URL` that points to a reachable PostgreSQL instance, generate the Prisma Client, and start the Next.js development server:
+
+```bash
+npm ci
+npx prisma generate
+npm run dev
+```
+
+The development server runs at http://localhost:3000.
+
+## Project context
+
+MediGuard was developed as a team project. It brings together full-stack web development, relational data modelling, medication-management workflows, caregiver functionality, browser notifications, and device integration.
 
 ---
 
-## 🛠️ Installazione e Setup Iniziale
-
-Esegui questi comandi nel terminale, passo dopo passo.
-
-### 1. Clona il Repository
-```bash
-git clone <https://github.com/SebaGra-coder/mediguard.git>
-cd mediguard
-```
-
-### 2. Installa le dipendenze
-Scarica tutte le librerie necessarie (Next.js, React, Prisma, ecc.) tramite npm:
-```bash
-npm install
-npm install jsonwebtoken bcryptjs
-```
-
-### 3. Configura l'Ambiente (.env)
-Crea un file chiamato `.env` nella root del progetto (accanto a `package.json`) e incollaci dentro la seguente configurazione.
-**Nota:** Chiedi al team le chiavi reali per `JWT_SECRET` e VAPID, oppure generane di nuove per test locale.
-
-```env
-# --- DATABASE ---
-# Connessione al DB Postgres gestito da Docker
-# NOTA: Deve corrispondere alle credenziali in docker-compose.yml
-DATABASE_URL="postgresql://myuser:mypassword@localhost:5432/mediguard_db"
-
-# --- SICUREZZA & AUTH ---
-# Una stringa casuale lunga per firmare i token di login
-JWT_SECRET="super-segreto-random-string-123!"
-
-# --- NOTIFICHE PUSH (WebPush) ---
-# Generabili con il comando: npx web-push generate-vapid-keys
-VAPID_SUBJECT="mailto:tuo-email@example.com"
-NEXT_PUBLIC_VAPID_PUBLIC_KEY="incolla_qui_la_tua_chiave_pubblica"
-VAPID_PRIVATE_KEY="incolla_qui_la_tua_chiave_privata"
-```
-
-### 4. Avvia il Database (Docker)
-Avvia il container Postgres in background:
-```bash
-docker-compose up -d postgres
-```
-> *Verifica che Docker Desktop sia aperto se il comando fallisce.*
-
-### 5. Inizializza il Database
-Crea le tabelle e popola il database con i dati iniziali (farmaci, ecc.):
-```bash
-# Crea lo schema delle tabelle
-npx prisma db push
-
-# (Opzionale) Carica i dati di prova/iniziali se presenti nel seed
-node prisma/seed.js
-```
-
----
-
-## ▶️ Avvio del Progetto
-
-Una volta completato il setup iniziale, per lavorare ogni giorno ti basta fare:
-
-1.  Assicurati che il DB sia acceso (se hai riavviato il PC):
-    ```bash
-    docker-compose up -d postgres
-    ```
-2.  Avvia il server di sviluppo:
-    ```bash
-    npm run dev
-    ```
-3.  Apri il browser su: [http://localhost:3000](http://localhost:3000)
-
----
-
-## 🔧 Comandi Utili
-
-| Comando | Descrizione |
-| :--- | :--- |
-| `npx prisma studio` | Apre un pannello web per vedere e modificare i dati nel DB manualmente. |
-| `npx prisma db push` | Aggiorna il DB se hai modificato il file `schema.prisma`. |
-| `docker-compose down` | Spegne il database (i dati rimangono salvati nel volume Docker). |
-
-## 🆘 Risoluzione Problemi
-
-**Errore connessione DB (`P1001`):**
-*   Controlla che Docker sia acceso.
-*   Controlla che `DATABASE_URL` nel `.env` usi la porta `5432` e il nome database `mediguard_db`.
-
-**Errore Login:**
-*   Verifica di aver impostato `JWT_SECRET` nel `.env`.
-
-**Notifiche non funzionano:**
-*   Assicurati di aver generato e inserito le chiavi VAPID nel `.env`.
+**Note:** MediGuard is a software project for medication inventory and therapy organization. It is not a substitute for professional medical advice, diagnosis, or treatment.
