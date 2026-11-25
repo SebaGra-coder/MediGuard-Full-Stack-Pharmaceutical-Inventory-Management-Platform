@@ -1,8 +1,88 @@
 // Importa l'oggetto per gestire le risposte HTTP in Next.js (App Router) 
 import { NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
+import jwt from 'jsonwebtoken';
+import { prisma } from '@/lib/prisma';
+async function getAuthenticatedUser() {
+  const cookieStore = await cookies();
+  const token = cookieStore.get('session_token');
 
-// Importa l'istanza di Prisma configurata per interagire con il database [cite: 1]
-import { prisma } from '@/lib/prisma'; 
+  if (!token) {
+    return {
+      error: NextResponse.json(
+        { success: false, error: 'Autenticazione richiesta.' },
+        { status: 401 }
+      )
+    };
+  }
+
+  try {
+    const secret = process.env.JWT_SECRET;
+
+    if (!secret) {
+      throw new Error('JWT_SECRET non configurato');
+    }
+
+    const decoded = jwt.verify(token.value, secret);
+
+    if (!decoded.id) {
+      throw new Error('Token senza ID utente');
+    }
+
+    const user = await prisma.utente.findUnique({
+      where: { id_utente: decoded.id },
+      select: { id_utente: true }
+    });
+
+    if (!user) {
+      return {
+        error: NextResponse.json(
+          { success: false, error: 'Utente non trovato.' },
+          { status: 401 }
+        )
+      };
+    }
+
+    return { userId: user.id_utente };
+
+  } catch (error) {
+    return {
+      error: NextResponse.json(
+        { success: false, error: 'Sessione non valida.' },
+        { status: 401 }
+      )
+    };
+  }
+}
+
+async function checkCabinetPermission(userId, patientId, requireWrite = false) {
+  if (userId === patientId) {
+    return { authorized: true, permission: 'OWNER' };
+  }
+
+  const relazione = await prisma.relazione.findFirst({
+    where: {
+      id_caregiver: userId,
+      id_assistito: patientId
+    },
+    select: {
+      permessi_armadietto: true
+    }
+  });
+
+  if (!relazione || relazione.permessi_armadietto === 'NIENTE') {
+    return { authorized: false };
+  }
+
+  if (requireWrite && relazione.permessi_armadietto !== 'ADMIN') {
+    return { authorized: false };
+  }
+
+  return {
+    authorized: true,
+    permission: relazione.permessi_armadietto
+  };
+}
 
 /**
  * Funzione per gestire le richieste HTTP POST alla rotta /api/armadietto
@@ -13,30 +93,45 @@ import { prisma } from '@/lib/prisma';
 
 export async function POST(request) {
   try {
+    const auth = await getAuthenticatedUser();
+    if (auth.error) return auth.error;
     // Legge il corpo della richiesta (il JSON inviato dal client) 
     const body = await request.json();
-    
+
     // Estrae i dati inviati dal client (id_utente_proprietario, codice_aic, ecc.) 
-    const { 
-      id_utente_proprietario, 
-      codice_aic, 
-      data_scadenza, 
-      lotto_produzione, 
-      quantita_rimanente 
+    const {
+      id_utente_proprietario,
+      codice_aic,
+      data_scadenza,
+      lotto_produzione,
+      quantita_rimanente
     } = body;
 
     // VALIDAZIONE: Verifica che i campi fondamentali siano presenti 
     if (!id_utente_proprietario) {
       return NextResponse.json(
-        { success: false, error: "Mancanza dell'ID dell'utente proprietario." }, 
+        { success: false, error: "Mancanza dell'ID dell'utente proprietario." },
         { status: 400 }
       );
     }
 
-        // VALIDAZIONE: Verifica che i campi fondamentali siano presenti 
+    const permission = await checkCabinetPermission(
+      auth.userId,
+      id_utente_proprietario,
+      true
+    );
+
+    if (!permission.authorized) {
+      return NextResponse.json(
+        { success: false, error: 'Non autorizzato a modificare questo armadietto.' },
+        { status: 403 }
+      );
+    }
+
+    // VALIDAZIONE: Verifica che i campi fondamentali siano presenti
     if (!codice_aic) {
       return NextResponse.json(
-        { success: false, error: "Mancanza del codice AIC del farmaco." }, 
+        { success: false, error: "Mancanza del codice AIC del farmaco." },
         { status: 400 }
       );
     }
@@ -46,7 +141,7 @@ export async function POST(request) {
     // VALIDAZIONE: Verifica che i campi fondamentali siano presenti 
     if (!data_scadenza) {
       return NextResponse.json(
-        { success: false, error: "Mancanza della data di scadenza del farmaco." }, 
+        { success: false, error: "Mancanza della data di scadenza del farmaco." },
         { status: 400 }
       );
     }
@@ -54,7 +149,7 @@ export async function POST(request) {
     // VALIDAZIONE: Verifica che i campi fondamentali siano presenti 
     if (!quantita_rimanente) {
       return NextResponse.json(
-        { success: false, error: "Mancanza della quantità rimanente del farmaco." }, 
+        { success: false, error: "Mancanza della quantità rimanente del farmaco." },
         { status: 400 }
       );
     }
@@ -63,19 +158,19 @@ export async function POST(request) {
     const nuovoFarmaco = await prisma.farmaco_armadietto.create({
       data: {
         // L'ID primario (UUID) viene generato automaticamente dal database 
-        
+
         // Associa il farmaco all'utente (deve essere un UUID valido esistente) [cite: 2, 10]
-        id_utente_proprietario: id_utente_proprietario, 
-        
+        id_utente_proprietario: id_utente_proprietario,
+
         // Associa il farmaco alla tabella 'farmaci' tramite l'AIC [cite: 7, 10]
-        codice_aic: codice_aic, 
-        
+        codice_aic: codice_aic,
+
         // Converte la stringa ISO ricevuta in un oggetto Date per il database 
-        data_scadenza: new Date(data_scadenza), 
-        
+        data_scadenza: new Date(data_scadenza),
+
         // Inserisce la stringa del lotto di produzione 
         lotto_produzione: lotto_produzione,
-        
+
         // Assicura che la quantità sia trattata come numero decimale (Float) 
         quantita_rimanente: parseFloat(quantita_rimanente),
       },
@@ -91,19 +186,19 @@ export async function POST(request) {
   } catch (error) {
     // Log dell'errore sul server per monitoraggio
     console.error("Errore durante il caricamento del farmaco:", error);
-    
+
     // GESTIONE ERRORI SPECIFICI: Chiave esterna non trovata (P2003) 
     // Accade se l'utente o il codice AIC non esistono nel DB
     if (error.code === 'P2003') {
       return NextResponse.json(
-        { success: false, error: "Errore: Utente o Codice AIC non presenti nel sistema." }, 
+        { success: false, error: "Errore: Utente o Codice AIC non presenti nel sistema." },
         { status: 400 }
       );
     }
 
     // Risposta generica per altri tipi di errore (connessione, ecc.) 
     return NextResponse.json(
-      { success: false, error: "Errore interno durante il salvataggio dei dati." }, 
+      { success: false, error: "Errore interno durante il salvataggio dei dati." },
       { status: 500 }
     );
   }
@@ -118,16 +213,29 @@ export async function POST(request) {
 // Esporta la funzione GET per gestire le richieste in lettura
 export async function GET(request) {
   // Crea un oggetto URL dalla richiesta per estrarre i parametri
-  const { searchParams } = new URL(request.url);
-  // Recupera il valore del parametro 'id_utente' dalla query string
-  const idUtente = searchParams.get('id_utente');
-
-  // Controllo di sicurezza: se l'ID non è fornito, restituisce errore 400
-  if (!idUtente) {
-    return NextResponse.json({ error: 'ID utente mancante' }, { status: 400 });
-  }
-
   try {
+    const { searchParams } = new URL(request.url);
+    // Recupera il valore del parametro 'id_utente' dalla query string
+    const idUtente = searchParams.get('id_utente');
+
+    // Controllo di sicurezza: se l'ID non è fornito, restituisce errore 400
+    if (!idUtente) {
+      return NextResponse.json({ error: 'ID utente mancante' }, { status: 400 });
+    }
+    const permission = await checkCabinetPermission(
+      auth.userId,
+      idUtente
+    );
+
+    if (!permission.authorized) {
+      return NextResponse.json(
+        { success: false, error: 'Non autorizzato a visualizzare questo armadietto.' },
+        { status: 403 }
+      );
+    }
+
+    const auth = await getAuthenticatedUser();
+    if (auth.error) return auth.error;
     // Utilizza il modello 'farmaco_armadietto' definito nello schema
     const armadietto = await prisma.farmaco_armadietto.findMany({
       where: {
@@ -137,7 +245,7 @@ export async function GET(request) {
       include: {
         // Esegue una JOIN con la tabella 'farmaci' usando la relazione codice_aic
         // Questo permette di ottenere anche 'denominazione', 'ragione_sociale', ecc.
-        farmaco: true, 
+        farmaco: true,
         terapia: {
           where: { terapia_attiva: true }
         }
@@ -155,6 +263,8 @@ export async function GET(request) {
 
 export async function DELETE(request) {
   try {
+    const auth = await getAuthenticatedUser();
+    if (auth.error) return auth.error;
     // Estrae i parametri dall'URL (es: ?id_farmaco=...)
     const { searchParams } = new URL(request.url);
     const idFarmacoArmadietto = searchParams.get('id_farmaco');
@@ -164,9 +274,38 @@ export async function DELETE(request) {
       return NextResponse.json({ success: false, error: 'ID farmaco mancante' }, { status: 400 });
     }
 
+    const farmacoEsistente = await prisma.farmaco_armadietto.findUnique({
+      where: {
+        id_farmaco_armadietto: idFarmacoArmadietto
+      },
+      select: {
+        id_utente_proprietario: true
+      }
+    });
+
+    if (!farmacoEsistente) {
+      return NextResponse.json(
+        { success: false, error: 'Farmaco non trovato nell’armadietto.' },
+        { status: 404 }
+      );
+    }
+
+    const permission = await checkCabinetPermission(
+      auth.userId,
+      farmacoEsistente.id_utente_proprietario,
+      true
+    );
+
+    if (!permission.authorized) {
+      return NextResponse.json(
+        { success: false, error: 'Non autorizzato a eliminare questo farmaco.' },
+        { status: 403 }
+      );
+    }
+
     // Utilizziamo una transazione per essere sicuri che se una operazione fallisce, l'altra non venga eseguita
     const risultato = await prisma.$transaction(async (tx) => {
-      
+
       // 1. Cerchiamo il farmaco nell'armadietto attivo prima di eliminarlo per recuperarne i dati
       const farmacoDaSpostare = await tx.farmaco_armadietto.findUnique({
         where: { id_farmaco_armadietto: idFarmacoArmadietto },
@@ -220,12 +359,12 @@ export async function DELETE(request) {
         // L'eliminazione del record (step 3) imposterà id_farmaco_armadietto a NULL (grazie a onDelete: SetNull nel DB),
         // ma noi forziamo lo stato 'terapia_attiva' a false per indicare lo stop.
         await tx.piano_terapeutico.updateMany({
-          where: { 
+          where: {
             id_farmaco_armadietto: idFarmacoArmadietto,
-            terapia_attiva: true 
+            terapia_attiva: true
           },
-          data: { 
-            terapia_attiva: false 
+          data: {
+            terapia_attiva: false
           }
         });
       }
@@ -239,9 +378,9 @@ export async function DELETE(request) {
     });
 
     // Risponde con successo includendo i dati del farmaco spostato
-    return NextResponse.json({ 
+    return NextResponse.json({
       message: 'Farmaco spostato nell’armadietto in disuso con successo',
-      data: risultato 
+      data: risultato
     }, { status: 200 });
 
   } catch (error) {
@@ -250,9 +389,9 @@ export async function DELETE(request) {
 
     // Gestione errore specifico: ID non valido (es. non è un UUID)
     if (error.code === 'P2023') {
-      return NextResponse.json({ 
-        success: false, 
-        error: "ID farmaco non valido (formato errato)" 
+      return NextResponse.json({
+        success: false,
+        error: "ID farmaco non valido (formato errato)"
       }, { status: 400 });
     }
 
@@ -263,24 +402,24 @@ export async function DELETE(request) {
 
     // Gestione errore Prisma: Record da eliminare non trovato (caso limite concorrenza)
     if (error.code === 'P2025') {
-      return NextResponse.json({ 
-       success: false, 
-       error: "Il farmaco non esiste o è già stato eliminato." 
-     }, { status: 404 });
-   }
+      return NextResponse.json({
+        success: false,
+        error: "Il farmaco non esiste o è già stato eliminato."
+      }, { status: 404 });
+    }
 
-   // Gestione errore Prisma: Violazione vincolo integrità (es. utente non più esistente)
-   if (error.code === 'P2003') {
-      return NextResponse.json({ 
-       success: false, 
-       error: "Impossibile completare l'operazione: violazione dei vincoli dei dati (es. utente non trovato)." 
-     }, { status: 400 });
-   }
+    // Gestione errore Prisma: Violazione vincolo integrità (es. utente non più esistente)
+    if (error.code === 'P2003') {
+      return NextResponse.json({
+        success: false,
+        error: "Impossibile completare l'operazione: violazione dei vincoli dei dati (es. utente non trovato)."
+      }, { status: 400 });
+    }
 
     // Restituisce errore 500 generico
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Impossibile completare l\'operazione di dismissione' 
+    return NextResponse.json({
+      success: false,
+      error: 'Impossibile completare l\'operazione di dismissione'
     }, { status: 500 });
   }
 }

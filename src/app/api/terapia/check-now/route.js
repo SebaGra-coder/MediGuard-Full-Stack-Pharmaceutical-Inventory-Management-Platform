@@ -2,15 +2,26 @@ import { prisma } from '@/lib/prisma';
 import { NextResponse } from 'next/server';
 import webpush from 'web-push';
 
-// Configurazione Web Push (assicurati che le variabili .env siano caricate)
-webpush.setVapidDetails(
-    process.env.VAPID_SUBJECT || 'mailto:example@yourdomain.com',
-    process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
-    process.env.VAPID_PRIVATE_KEY
-);
+
 
 export async function GET(request) {
+
     try {
+        if (
+            !process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ||
+            !process.env.VAPID_PRIVATE_KEY
+        ) {
+            return NextResponse.json(
+                { error: 'Configurazione Web Push non disponibile.' },
+                { status: 500 }
+            );
+        }
+
+        webpush.setVapidDetails(
+            process.env.VAPID_SUBJECT || 'mailto:example@yourdomain.com',
+            process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
+            process.env.VAPID_PRIVATE_KEY
+        );
         // 1. Forza l'orario italiano (Rome) per il confronto con il DB
         const oraItaliana = new Intl.DateTimeFormat('it-IT', {
             hour: '2-digit',
@@ -34,8 +45,8 @@ export async function GET(request) {
         // 1. CONTROLLO TERAPIE (Logica Predittiva e Contestuale)
         // ---------------------------------------------------------
         const terapieAttive = await prisma.piano_terapeutico.findMany({
-            where: { 
-                terapia_attiva: true 
+            where: {
+                terapia_attiva: true
             },
             include: {
                 paziente: {
@@ -78,7 +89,7 @@ export async function GET(request) {
             // --- A. PROMEMORIA ASSUNZIONE (Legato all'orario) ---
             // Se forceCheck è true, inviamo il promemoria per testare (se ci sono orari definiti)
             if (orariArray.includes(oraItaliana) || (forceCheck && orariArray.length > 0)) {
-                
+
                 // Cerca l'evento specifico di oggi nel registro assunzioni per l'ID
                 const oggiInizio = new Date();
                 oggiInizio.setHours(0, 0, 0, 0);
@@ -119,7 +130,7 @@ export async function GET(request) {
                 // Se c'è più di un'assunzione al giorno, potremmo dover raffinare la query sull'orario, 
                 // ma assumiamo che check-now giri spesso. 
                 // Migliore: Cerchiamo l'assunzione programmata circa 30 min fa.
-                
+
                 // Ricostruiamo la data programmata target (oggi + oraMeno30)
                 const [h, m] = oraMeno30.split(':').map(Number);
                 const targetTimeStart = new Date();
@@ -152,7 +163,7 @@ export async function GET(request) {
                     }).format(dataProg);
 
                     if (oraProg === oraMeno30) {
-                         caregiverMessagesToSend.push({
+                        caregiverMessagesToSend.push({
                             title: `⚠️ Ritardo Assunzione: ${terapia.paziente.nome} ${terapia.paziente.cognome}`,
                             body: `L'assistito non ha confermato l'assunzione di ${terapia.farmaco?.farmaco?.denominazione} prevista per le ${oraMeno30}.`,
                             data: { url: `/Pages/Assistito/${terapia.paziente.id_utente}` }
@@ -180,7 +191,7 @@ export async function GET(request) {
                             data: { url: '/Pages/Terapie' }
                         };
                         messagesToSend.push(msg);
-                        
+
                         // Avviso anche Caregiver
                         caregiverMessagesToSend.push({
                             title: `⛔ Scadenza Farmaco: ${terapia.paziente.nome}`,
@@ -215,14 +226,14 @@ export async function GET(request) {
                     const dose = Number(terapia.dose_singola) || 0;
                     const numAssunzioni = Array.isArray(terapia.orari) ? terapia.orari.length : 0;
                     const consumoGiornaliero = dose * numAssunzioni;
-                    
+
                     let scortaBassa = false;
 
                     if (terapia.data_fine) {
                         const oggi = new Date();
                         const fine = new Date(terapia.data_fine);
                         fine.setHours(23, 59, 59, 999); // Include tutta la giornata di fine
-                        
+
                         if (fine >= oggi) {
                             const diffMs = fine.getTime() - oggi.getTime();
                             const giorniRimanenti = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
@@ -304,7 +315,7 @@ export async function GET(request) {
                 },
                 include: {
                     utente: {
-                        include: { 
+                        include: {
                             notifiche: true,
                             assistito: { // Include i caregiver dell'utente proprietario dell'armadietto
                                 include: {
@@ -335,7 +346,7 @@ export async function GET(request) {
                         const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
                         if (diffDays < 0) {
-                             const msg = {
+                            const msg = {
                                 title: `⛔ Armadietto: ${farmaco.farmaco.denominazione} SCADUTO`,
                                 body: `Un farmaco nel tuo armadietto è scaduto.`,
                                 data: { url: '/Pages/Armadietto' }
@@ -349,7 +360,7 @@ export async function GET(request) {
                             });
 
                         } else if ([15, 7, 1].includes(diffDays)) {
-                             const msg = {
+                            const msg = {
                                 title: `⚠️ Armadietto: ${farmaco.farmaco.denominazione}`,
                                 body: `Scade tra ${diffDays} giorni.`,
                                 data: { url: '/Pages/Armadietto' }
@@ -416,10 +427,10 @@ export async function GET(request) {
         // Attendi il completamento di tutti gli invii
         await Promise.all(notificheInviate);
 
-        return NextResponse.json({ 
-            success: true, 
+        return NextResponse.json({
+            success: true,
             orario_controllato: oraItaliana,
-            notifiche_processate: notificheInviate.length 
+            notifiche_processate: notificheInviate.length
         });
 
     } catch (error) {

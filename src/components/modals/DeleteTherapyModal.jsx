@@ -32,7 +32,7 @@ const Modal = ({ isOpen, onClose, title, children, footer }) => {
                 <div className={styles.header}>
                     <h3 className={styles.title}>{title}</h3>
                     <button onClick={onClose} className={styles.closeBtn}>
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 18 18"/></svg>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18" /><path d="m6 6 18 18" /></svg>
                     </button>
                 </div>
                 <div className={styles.content}>{children}</div>
@@ -48,15 +48,23 @@ export default function DeleteTherapyModal({ isOpen, onClose, therapy, onSuccess
 
     const handleDelete = async () => {
         if (!therapy) return;
+
         try {
-            // Elimina prima le assunzioni associate (incluse quelle passate/archiviate)
-            await fetch(`/api/assunzione?id_terapia=${therapy.id}`, {
+            // 1. Elimina o archivia prima le assunzioni associate
+            const intakeRes = await fetch(`/api/assunzione?id_terapia=${therapy.id}`, {
                 method: 'DELETE'
             });
 
+            if (!intakeRes.ok) {
+                showToast("Impossibile eliminare le assunzioni associate", "error");
+                return;
+            }
+
+            // 2. Elimina la terapia solo se il passaggio precedente è riuscito
             const res = await fetch(`/api/terapia?id_terapia=${therapy.id}`, {
                 method: 'DELETE'
             });
+
             if (res.ok) {
                 if (onSuccess) onSuccess("Terapia eliminata con successo");
                 onClose();
@@ -85,7 +93,7 @@ export default function DeleteTherapyModal({ isOpen, onClose, therapy, onSuccess
         >
             <ToastComponent />
             <p className={styles.textSlate500}>
-                Sei sicuro di voler eliminare la terapia <strong>{therapy.medicine}</strong>? 
+                Sei sicuro di voler eliminare la terapia <strong>{therapy.medicine}</strong>?
                 Questa azione non può essere annullata e perderai lo storico dell&apos;aderenza.
             </p>
         </Modal>

@@ -13,7 +13,7 @@ export async function GET(req) {
     // 1. Identificazione della modalità
     // Controlla se l'URL contiene il flag "me" (es. ?me oppure ?me=true)
     const isMeAction = url.searchParams.has('me');
-    
+
     // Altri filtri definiscono una ricerca pubblica
     const isSearch = queryParams.email || queryParams.nome || queryParams.cognome || queryParams.id;
 
@@ -31,10 +31,10 @@ export async function GET(req) {
     }
 
     // 3. Configurazione Campi Consentiti
-    const allowedFieldsSearch = ['id_utente', 'email', 'nome', 'cognome', 'data_nascita'];
+    const allowedFieldsSearch = ['id_utente', 'email', 'nome', 'cognome'];
     const allowedFieldsPersonal = [
-      'id_utente', 'email', 'nome', 'cognome', 'data_nascita', 'allergie', 
-      'permessi_armadietto', 'permessi_piano', 'caregiver', 'assistito', 
+      'id_utente', 'email', 'nome', 'cognome', 'data_nascita', 'allergie',
+      'permessi_armadietto', 'permessi_piano', 'caregiver', 'assistito',
       'armadietto', 'terapie', 'codici_generati'
     ];
     const fieldAliases = { DOB: 'data_nascita' };
@@ -49,68 +49,53 @@ export async function GET(req) {
         return NextResponse.json({ message: 'Autenticazione richiesta' }, { status: 401 });
       }
       allowedFields = allowedFieldsPersonal;
-      
+
       // Inizializza selectFields
       allowedFieldsPersonal.forEach(f => {
         if (f === 'caregiver') {
-            // Se richiesto il campo caregiver, includiamo i dettagli necessari per la dashboard
-            // Calcoliamo la data di una settimana fa per filtrare le assunzioni
-            const oneWeekAgo = new Date();
-            oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-            oneWeekAgo.setHours(0,0,0,0);
+          // Se richiesto il campo caregiver, includiamo i dettagli necessari per la dashboard
+          // Calcoliamo la data di una settimana fa per filtrare le assunzioni
+          const oneWeekAgo = new Date();
+          oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+          oneWeekAgo.setHours(0, 0, 0, 0);
 
-            selectFields[f] = {
+          selectFields[f] = {
+            select: {
+              id_relazione: true,
+              id_assistito: true,
+              permessi_armadietto: true,
+              permessi_piano: true,
+              assistito: {
                 select: {
-                    id_relazione: true,
-                    id_assistito: true,
-                    permessi_armadietto: true,
-                    permessi_piano: true,
-                    assistito: {
-                        select: {
-                            id_utente: true,
-                            nome: true,
-                            cognome: true,
-                            email: true,
-                            data_nascita: true,
-                            armadietto: {
-                                include: {
-                                    farmaco: true
-                                }
-                            }, // Serve per Low Stock
-                            terapie: {
-                                where: { terapia_attiva: true },
-                                include: {
-                                    assunzioni: {
-                                        where: {
-                                            data_programmata: { gte: oneWeekAgo }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                  id_utente: true,
+                  nome: true,
+                  cognome: true,
+                  email: true,
+                  data_nascita: true
                 }
-            };
+              }
+            }
+          };
         } else if (f === 'assistito') {
-            // Se richiesto il campo assistito (i miei caregiver), includiamo i dettagli del caregiver
-            selectFields[f] = {
+          // Se richiesto il campo assistito (i miei caregiver), includiamo i dettagli del caregiver
+          selectFields[f] = {
+            select: {
+              id_relazione: true,
+              id_caregiver: true,
+              caregiver: {
                 select: {
-                    id_relazione: true,
-                    id_caregiver: true,
-                    caregiver: {
-                        select: {
-                            id_utente: true,
-                            nome: true,
-                            cognome: true,
-                            email: true
-                        }
-                    },
-                    permessi_armadietto: true,
-                    permessi_piano: true
+                  id_utente: true,
+                  nome: true,
+                  cognome: true,
+                  email: true
                 }
-            };
+              },
+              permessi_armadietto: true,
+              permessi_piano: true
+            }
+          };
         } else {
-            selectFields[f] = true;
+          selectFields[f] = true;
         }
       });
     } else if (isSearch) {
@@ -128,12 +113,12 @@ export async function GET(req) {
       requested.forEach(f => {
         const realField = fieldAliases[f] || f;
         if (allowedFields.includes(realField)) {
-           // Se è il campo caregiver e siamo in modalità ME, preserviamo la struttura complessa
-           if (realField === 'caregiver' && isMeAction) {
-               customSelect[realField] = selectFields[realField];
-           } else {
-               customSelect[realField] = true;
-           }
+          // Se è il campo caregiver e siamo in modalità ME, preserviamo la struttura complessa
+          if (realField === 'caregiver' && isMeAction) {
+            customSelect[realField] = selectFields[realField];
+          } else {
+            customSelect[realField] = true;
+          }
         }
       });
       if (Object.keys(customSelect).length > 0) {
@@ -149,136 +134,252 @@ export async function GET(req) {
       });
 
       // --- POST-PROCESSING per Statistiche Dashboard Caregiver ---
+      // --- POST-PROCESSING per Statistiche Dashboard Caregiver ---
       if (utente && utente.caregiver && Array.isArray(utente.caregiver)) {
-         const today = new Date();
-         today.setHours(0,0,0,0);
-         const now = new Date();
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
 
-         utente.caregiver = await Promise.all(utente.caregiver.map(async (relazione) => {
-             const paziente = relazione.assistito;
-             if (!paziente) return relazione;
+        const now = new Date();
 
-             // Raccogli tutte le assunzioni della settimana da tutte le terapie
-             let allAssunzioniWeek = [];
-             if (paziente.terapie) {
-                 paziente.terapie.forEach(t => {
-                     if (t.assunzioni) {
-                         allAssunzioniWeek = allAssunzioniWeek.concat(t.assunzioni);
-                     }
-                 });
-             }
+        utente.caregiver = await Promise.all(
+          utente.caregiver.map(async (relazione) => {
+            const paziente = relazione.assistito;
 
-             // Filtra per Oggi
-             const assunzioniOggi = allAssunzioniWeek.filter(a => {
-                 const d = new Date(a.data_programmata);
-                 return d >= today && d < new Date(today.getTime() + 24 * 60 * 60 * 1000);
-             });
+            if (!paziente) return relazione;
 
-             // Calcolo Aderenza Oggi
-             let adherenceToday = 100;
-             if (assunzioniOggi.length > 0) {
-                 const taken = assunzioniOggi.filter(a => a.esito === true).length;
-                 adherenceToday = Math.round((taken / assunzioniOggi.length) * 100);
-             }
+            // Verifica separatamente i permessi dei due ambiti.
+            const canReadCabinet =
+              relazione.permessi_armadietto !== 'NIENTE';
 
-             // Calcolo Aderenza Settimana
-             let adherenceWeek = 100;
-             if (allAssunzioniWeek.length > 0) {
-                 const taken = allAssunzioniWeek.filter(a => a.esito === true).length;
-                 adherenceWeek = Math.round((taken / allAssunzioniWeek.length) * 100);
-             }
+            const canReadPlan =
+              relazione.permessi_piano !== 'NIENTE';
 
-             // Calcolo Alert (Assunzioni mancate o in ritardo > 1h nelle ultime 24h)
-             const alerts = allAssunzioniWeek.filter(a => {
-                 const d = new Date(a.data_programmata);
-                 const isRecent = d > new Date(now.getTime() - 24 * 60 * 60 * 1000) && d <= now;
-                 
-                 const isMissed = a.esito === false;
-                 const isLate = a.esito === null && d < new Date(now.getTime() - 60 * 60 * 1000); // 1 ora tolleranza
-                 
-                 return isRecent && (isMissed || isLate);
-             }).length;
+            // Intervallo temporale utilizzato dalla dashboard.
+            const oneWeekAgo = new Date();
+            oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+            oneWeekAgo.setHours(0, 0, 0, 0);
 
-             // Scorte basse (< 5 unità)
-             const lowStock = paziente.armadietto ? paziente.armadietto.filter(f => f.quantita_rimanente < 5).length : 0;
+            // Carica soltanto i dati autorizzati dalla relazione.
+            const [armadietto, terapie] = await Promise.all([
+              canReadCabinet
+                ? prisma.farmaco_armadietto.findMany({
+                  where: {
+                    id_utente_proprietario: paziente.id_utente
+                  },
+                  include: {
+                    farmaco: true
+                  }
+                })
+                : Promise.resolve([]),
 
-             // Ultima attività
-             // Recupera l'ultima assunzione effettiva dal DB (indipendentemente dalla settimana o stato terapia)
-             const userTherapies = await prisma.piano_terapeutico.findMany({
-                 where: { id_paziente: paziente.id_utente },
-                 select: { id_terapia: true }
-             });
-             
-             const therapyIds = userTherapies.map(t => t.id_terapia);
-             
-             let lastActivity = "N/A";
-             
-             if (therapyIds.length > 0) {
-                 const lastIntake = await prisma.registro_assunzioni.findFirst({
-                 where: {
-                     id_terapia: { in: therapyIds },
-                     orario_effettivo: { not: null }
-                 },
-                 orderBy: { orario_effettivo: 'desc' }
-             });
-             
-             if (lastIntake && lastIntake.orario_effettivo) {
-                 const laDate = new Date(lastIntake.orario_effettivo);
-                 if (laDate.toDateString() === now.toDateString()) {
-                     lastActivity = laDate.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' });
-                 } else {
-                     lastActivity = laDate.toLocaleDateString('it-IT');
-                 }
-             }
-             }
+              canReadPlan
+                ? prisma.piano_terapeutico.findMany({
+                  where: {
+                    id_paziente: paziente.id_utente,
+                    terapia_attiva: true
+                  },
+                  include: {
+                    assunzioni: {
+                      where: {
+                        data_programmata: {
+                          gte: oneWeekAgo
+                        }
+                      }
+                    }
+                  }
+                })
+                : Promise.resolve([])
+            ]);
 
-             // Prossima dose (Future assunzioni non ancora esitate)
-             // Nota: qui abbiamo caricato solo le assunzioni della settimana passata (gte oneWeekAgo).
-             // Per la prossima dose futura, dovremmo caricare anche quelle future.
-             // La query sopra include assunzioni con data >= oneWeekAgo, quindi include anche il futuro se generato.
-             const futureAssunzioni = allAssunzioniWeek.filter(a => new Date(a.data_programmata) > now && a.esito === null);
-             futureAssunzioni.sort((a, b) => new Date(a.data_programmata) - new Date(b.data_programmata));
-             
-             let nextDose = "Nessuna";
-             if (futureAssunzioni.length > 0) {
-                 nextDose = new Date(futureAssunzioni[0].data_programmata).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' });
-             } else if (alerts > 0) {
-                 nextDose = "In ritardo";
-             } else {
-                 nextDose = "Tutto ok";
-             }
+            // Non vengono restituiti dati non autorizzati.
+            paziente.armadietto = armadietto;
+            paziente.terapie = terapie;
 
-             // Status
-             let status = "ok";
-             if (alerts > 0 || adherenceToday < 50) status = "alert";
-             else if (adherenceToday < 80 || lowStock > 2) status = "warning";
+            // Raccoglie le assunzioni della settimana.
+            let allAssunzioniWeek = [];
 
-             // Arricchimento oggetto assistito
-             return {
-                 ...relazione,
-                 assistito: {
-                     ...paziente,
-                     dashboardStats: {
-                         adherenceToday,
-                         adherenceWeek,
-                         alerts,
-                         lowStock,
-                         lastActivity,
-                         nextDose,
-                         status
-                     }
-                 }
-             };
-         }));
+            if (canReadPlan) {
+              terapie.forEach(t => {
+                if (t.assunzioni) {
+                  allAssunzioniWeek = allAssunzioniWeek.concat(t.assunzioni);
+                }
+              });
+            }
+
+            // Filtra le assunzioni di oggi.
+            const assunzioniOggi = allAssunzioniWeek.filter(a => {
+              const d = new Date(a.data_programmata);
+
+              return (
+                d >= today &&
+                d < new Date(today.getTime() + 24 * 60 * 60 * 1000)
+              );
+            });
+
+            // Calcolo aderenza giornaliera.
+            let adherenceToday = 100;
+
+            if (assunzioniOggi.length > 0) {
+              const taken = assunzioniOggi.filter(a => a.esito === true).length;
+              adherenceToday = Math.round(
+                (taken / assunzioniOggi.length) * 100
+              );
+            }
+
+            // Calcolo aderenza settimanale.
+            let adherenceWeek = 100;
+
+            if (allAssunzioniWeek.length > 0) {
+              const taken = allAssunzioniWeek.filter(a => a.esito === true).length;
+              adherenceWeek = Math.round(
+                (taken / allAssunzioniWeek.length) * 100
+              );
+            }
+
+            // Calcolo alert: assunzioni mancate o in ritardo.
+            const alerts = allAssunzioniWeek.filter(a => {
+              const d = new Date(a.data_programmata);
+
+              const isRecent =
+                d > new Date(now.getTime() - 24 * 60 * 60 * 1000) &&
+                d <= now;
+
+              const isMissed = a.esito === false;
+
+              const isLate =
+                a.esito === null &&
+                d < new Date(now.getTime() - 60 * 60 * 1000);
+
+              return isRecent && (isMissed || isLate);
+            }).length;
+
+            // Scorte basse: solo se il caregiver può leggere l'armadietto.
+            const lowStock = canReadCabinet
+              ? armadietto.filter(f => f.quantita_rimanente < 5).length
+              : null;
+
+            // Ultima attività: solo se può leggere il piano terapeutico.
+            let lastActivity = 'N/A';
+
+            if (canReadPlan) {
+              const userTherapies = await prisma.piano_terapeutico.findMany({
+                where: {
+                  id_paziente: paziente.id_utente
+                },
+                select: {
+                  id_terapia: true
+                }
+              });
+
+              const therapyIds = userTherapies.map(t => t.id_terapia);
+
+              if (therapyIds.length > 0) {
+                const lastIntake = await prisma.registro_assunzioni.findFirst({
+                  where: {
+                    id_terapia: {
+                      in: therapyIds
+                    },
+                    orario_effettivo: {
+                      not: null
+                    }
+                  },
+                  orderBy: {
+                    orario_effettivo: 'desc'
+                  }
+                });
+
+                if (lastIntake?.orario_effettivo) {
+                  const laDate = new Date(lastIntake.orario_effettivo);
+
+                  if (laDate.toDateString() === now.toDateString()) {
+                    lastActivity = laDate.toLocaleTimeString('it-IT', {
+                      hour: '2-digit',
+                      minute: '2-digit'
+                    });
+                  } else {
+                    lastActivity = laDate.toLocaleDateString('it-IT');
+                  }
+                }
+              }
+            }
+
+            // Prossima dose.
+            const futureAssunzioni = allAssunzioniWeek.filter(
+              a => new Date(a.data_programmata) > now && a.esito === null
+            );
+
+            futureAssunzioni.sort(
+              (a, b) =>
+                new Date(a.data_programmata) - new Date(b.data_programmata)
+            );
+
+            let nextDose = 'Nessuna';
+
+            if (futureAssunzioni.length > 0) {
+              nextDose = new Date(
+                futureAssunzioni[0].data_programmata
+              ).toLocaleTimeString('it-IT', {
+                hour: '2-digit',
+                minute: '2-digit'
+              });
+            } else if (alerts > 0) {
+              nextDose = 'In ritardo';
+            } else {
+              nextDose = 'Tutto ok';
+            }
+
+            // Stato dashboard, calcolato solo sui dati accessibili.
+            let status = 'ok';
+
+            if (canReadPlan && (alerts > 0 || adherenceToday < 50)) {
+              status = 'alert';
+            } else if (
+              (canReadPlan && adherenceToday < 80) ||
+              (canReadCabinet && lowStock > 2)
+            ) {
+              status = 'warning';
+            }
+
+            if (!canReadPlan && !canReadCabinet) {
+              status = 'unavailable';
+            }
+
+            return {
+              ...relazione,
+              assistito: {
+                ...paziente,
+                dashboardStats: {
+                  adherenceToday: canReadPlan ? adherenceToday : null,
+                  adherenceWeek: canReadPlan ? adherenceWeek : null,
+                  alerts: canReadPlan ? alerts : null,
+                  lowStock,
+                  lastActivity: canReadPlan ? lastActivity : 'Non disponibile',
+                  nextDose: canReadPlan ? nextDose : 'Non disponibile',
+                  status
+                }
+              }
+            };
+          })
+        );
       }
-
-      return NextResponse.json(utente, { status: 200 });
     } else {
       const whereClause = {};
       if (queryParams.email) whereClause.email = { contains: queryParams.email, mode: 'insensitive' };
       if (queryParams.nome) whereClause.nome = { contains: queryParams.nome, mode: 'insensitive' };
       if (queryParams.cognome) whereClause.cognome = { contains: queryParams.cognome, mode: 'insensitive' };
-      if (queryParams.id) whereClause.id_utente = parseInt(queryParams.id, 10);
+      if (queryParams.id) {
+        const uuidRegex =
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+        if (!uuidRegex.test(queryParams.id)) {
+          return NextResponse.json(
+            { message: 'ID utente non valido' },
+            { status: 400 }
+          );
+        }
+
+        whereClause.id_utente = queryParams.id;
+      }
 
       const utenti = await prisma.utente.findMany({
         where: whereClause,
@@ -316,8 +417,13 @@ export async function PUT(req) {
     // Leggi il body della richiesta
     const body = await req.json();
 
-    const allowedUpdateFields = ['email', 'password', 'nome', 'cognome', 'data_nascita', 'permessi_armadietto', 'permessi_piano'];
-
+    const allowedUpdateFields = [
+      'email',
+      'password',
+      'nome',
+      'cognome',
+      'data_nascita'
+    ];
     // Filtra i campi dal body
     const updateData = {};
     for (const field of allowedUpdateFields) {

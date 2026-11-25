@@ -1,19 +1,101 @@
-// Importa l'oggetto per gestire le risposte HTTP in Next.js (App Router)
 import { NextResponse } from 'next/server';
-
-// Importa l'istanza di Prisma configurata per interagire con il database [cite: 1]
+import { cookies } from 'next/headers';
+import jwt from 'jsonwebtoken';
 import { prisma } from '@/lib/prisma';
+
+async function getAuthenticatedUser() {
+  const cookieStore = await cookies();
+  const token = cookieStore.get('session_token');
+
+  if (!token) {
+    return {
+      error: NextResponse.json(
+        { success: false, error: 'Autenticazione richiesta.' },
+        { status: 401 }
+      )
+    };
+  }
+
+  try {
+    const secret = process.env.JWT_SECRET;
+    if (!secret) throw new Error('JWT_SECRET non configurato');
+
+    const decoded = jwt.verify(token.value, secret);
+
+    if (!decoded.id) throw new Error('Token senza ID utente');
+
+    const user = await prisma.utente.findUnique({
+      where: { id_utente: decoded.id },
+      select: { id_utente: true }
+    });
+
+    if (!user) {
+      return {
+        error: NextResponse.json(
+          { success: false, error: 'Utente non trovato.' },
+          { status: 401 }
+        )
+      };
+    }
+
+    return { userId: user.id_utente };
+
+  } catch (error) {
+    return {
+      error: NextResponse.json(
+        { success: false, error: 'Sessione non valida.' },
+        { status: 401 }
+      )
+    };
+  }
+}
+
+async function checkPatientPermission(userId, patientId, requireWrite = false) {
+  if (userId === patientId) {
+    return { authorized: true, permission: 'OWNER' };
+  }
+
+  const relazione = await prisma.relazione.findFirst({
+    where: {
+      id_caregiver: userId,
+      id_assistito: patientId
+    },
+    select: {
+      permessi_piano: true
+    }
+  });
+
+  if (!relazione || relazione.permessi_piano === 'NIENTE') {
+    return { authorized: false };
+  }
+
+  if (requireWrite && relazione.permessi_piano !== 'ADMIN') {
+    return { authorized: false };
+  }
+
+  return {
+    authorized: true,
+    permission: relazione.permessi_piano
+  };
+}
 
 /**
  * GESTIONE POST: Crea un nuovo piano terapeutico
  * @param {Request} request - Contiene il corpo della terapia (id_paziente, id_farmaco_armadietto, ecc.)
  */
+
 export async function POST(request) {
   try {
-    // Legge il corpo della richiesta in formato JSON
+    // 1. Verifica autenticazione
+    const auth = await getAuthenticatedUser();
+
+    if (auth.error) {
+      return auth.error;
+    }
+
+    // 2. Legge il corpo della richiesta
     const body = await request.json();
 
-    // Estrae i dati necessari dal corpo della richiesta [cite: 12, 13]
     const {
       id_paziente,
       id_farmaco_armadietto,
@@ -27,7 +109,7 @@ export async function POST(request) {
       orari
     } = body;
 
-    // VALIDAZIONE: Verifica che l'ID del paziente sia presente [cite: 12]
+    // 3. Validazione dei campi obbligatori
     if (!id_paziente) {
       return NextResponse.json(
         { success: false, error: "Mancanza dell'ID del paziente." },
@@ -35,7 +117,6 @@ export async function POST(request) {
       );
     }
 
-    // VALIDAZIONE: Verifica che il farmaco dell'armadietto sia specificato [cite: 12]
     if (!id_farmaco_armadietto) {
       return NextResponse.json(
         { success: false, error: "Mancanza dell'ID del farmaco nell'armadietto." },
@@ -43,7 +124,6 @@ export async function POST(request) {
       );
     }
 
-    // VALIDAZIONE: Verifica che sia presente una dose [cite: 12]
     if (dose_singola === undefined || isNaN(parseFloat(dose_singola))) {
       return NextResponse.json(
         { success: false, error: "Dose singola non valida." },
@@ -51,46 +131,77 @@ export async function POST(request) {
       );
     }
 
-    // OPERAZIONE SUL DATABASE: Creazione del record Piano_terapeutico [cite: 12]
-    const nuovoPiano = await prisma.piano_terapeutico.create({
-      data: {
-        // L'ID della terapia (UUID) viene generato automaticamente [cite: 12]
+    // 4. Verifica i permessi sul paziente
+    const permission = await checkPatientPermission(
+      auth.userId,
+      id_paziente,
+      true
+    );
 
-        // Collega il piano al paziente (Utente) [cite: 12]
-        id_paziente: id_paziente,
+    if (!permission.authorized) {
+      return NextResponse.json(
+        { success: false, error: "Non hai i permessi per creare terapie per questo paziente." },
+        { status: 403 }
+      );
+    }
 
-        // Collega il piano al farmaco specifico nell'armadietto [cite: 12]
-        id_farmaco_armadietto: id_farmaco_armadietto,
-
-        // Etichetta personalizzata per la terapia (es. "Per il mal di testa") [cite: 12]
-        nome_utilita: nome_utilita,
-
-        // Quantità di farmaco da assumere [cite: 12]
-        dose_singola: parseFloat(dose_singola),
-
-        // Flag booleano: indica se va preso solo al bisogno [cite: 12]
-        solo_al_bisogno: Boolean(solo_al_bisogno),
-
-        // Flag booleano: indica se la terapia è attualmente in corso [cite: 13]
-        terapia_attiva: Boolean(terapia_attiva),
-
-        data_inizio: data_inizio ? new Date(data_inizio) : null,
-        data_fine: data_fine ? new Date(data_fine) : null,
-
-        note: note,
-
-        orari: orari || []
+    // 5. Verifica che il farmaco appartenga all'armadietto del paziente
+    const farmaco = await prisma.farmaco_armadietto.findUnique({
+      where: {
+        id_farmaco_armadietto: id_farmaco_armadietto
       },
+      select: {
+        id_utente_proprietario: true
+      }
     });
 
-    // GENERAZIONE INIZIALE ASSUNZIONI (Se ci sono orari e non è al bisogno)
-    if (Array.isArray(orari) && !nuovoPiano.solo_al_bisogno && nuovoPiano.terapia_attiva) {
+    if (!farmaco) {
+      return NextResponse.json(
+        { success: false, error: "Farmaco nell'armadietto non trovato." },
+        { status: 404 }
+      );
+    }
+
+    if (farmaco.id_utente_proprietario !== id_paziente) {
+      return NextResponse.json(
+        { success: false, error: "Il farmaco selezionato non appartiene all'armadietto del paziente." },
+        { status: 403 }
+      );
+    }
+
+    // 6. Creazione del piano terapeutico
+    const nuovoPiano = await prisma.piano_terapeutico.create({
+      data: {
+        id_paziente: id_paziente,
+        id_farmaco_armadietto: id_farmaco_armadietto,
+        nome_utilita: nome_utilita,
+        dose_singola: parseFloat(dose_singola),
+        solo_al_bisogno: Boolean(solo_al_bisogno),
+        terapia_attiva: Boolean(terapia_attiva),
+        data_inizio: data_inizio ? new Date(data_inizio) : null,
+        data_fine: data_fine ? new Date(data_fine) : null,
+        note: note,
+        orari: orari || []
+      }
+    });
+
+    // 7. Generazione iniziale delle assunzioni
+    if (
+      Array.isArray(orari) &&
+      !nuovoPiano.solo_al_bisogno &&
+      nuovoPiano.terapia_attiva
+    ) {
       const now = new Date();
       const startOfToday = new Date(now);
       startOfToday.setHours(0, 0, 0, 0);
 
-      let generationStart = nuovoPiano.data_inizio ? new Date(nuovoPiano.data_inizio) : startOfToday;
-      if (generationStart < startOfToday) generationStart = startOfToday;
+      let generationStart = nuovoPiano.data_inizio
+        ? new Date(nuovoPiano.data_inizio)
+        : startOfToday;
+
+      if (generationStart < startOfToday) {
+        generationStart = startOfToday;
+      }
 
       let generationEnd = nuovoPiano.data_fine
         ? new Date(nuovoPiano.data_fine)
@@ -101,10 +212,10 @@ export async function POST(request) {
 
       while (iterDate <= generationEnd) {
         const dateStr = iterDate.toISOString().split('T')[0];
+
         for (const ora of orari) {
           const scheduledTime = new Date(`${dateStr}T${ora}:00`);
 
-          // Crea solo se l'orario è valido per oggi o per il futuro
           if (scheduledTime >= startOfToday) {
             intakesToCreate.push({
               id_terapia: nuovoPiano.id_terapia,
@@ -114,6 +225,7 @@ export async function POST(request) {
             });
           }
         }
+
         iterDate.setDate(iterDate.getDate() + 1);
       }
 
@@ -124,7 +236,7 @@ export async function POST(request) {
       }
     }
 
-    // Ritorna il record creato con successo (Status 201 Created)
+    // 8. Risposta
     return NextResponse.json({
       success: true,
       message: "Piano terapeutico creato correttamente",
@@ -132,10 +244,8 @@ export async function POST(request) {
     }, { status: 201 });
 
   } catch (error) {
-    // Logga l'errore per il debug sul server
     console.error("Errore creazione piano terapeutico:", error);
 
-    // Gestione errore vincoli di integrità (es. paziente o farmaco non esistenti)
     if (error.code === 'P2003') {
       return NextResponse.json(
         { success: false, error: "Errore: Paziente o Farmaco Armadietto non validi." },
@@ -149,6 +259,7 @@ export async function POST(request) {
     );
   }
 }
+
 
 /**
  * GESTIONE GET: Recupera tutti i piani terapeutici di un paziente
@@ -192,12 +303,19 @@ export async function GET(request) {
 }
 */
 // Esporta la funzione GET per gestire le richieste di lettura in modo dinamico
+
 export async function GET(request) {
   try {
-    // Estrae i parametri di ricerca dall'URL della richiesta
+    // 1. Verifica autenticazione
+    const auth = await getAuthenticatedUser();
+
+    if (auth.error) {
+      return auth.error;
+    }
+
+    // 2. Estrae i parametri dalla query string
     const { searchParams } = new URL(request.url);
 
-    // Recupera i singoli parametri dalla query string
     const id_terapia = searchParams.get('id_terapia');
     const id_paziente = searchParams.get('id_paziente');
     const id_farmaco_armadietto = searchParams.get('id_farmaco_armadietto');
@@ -208,86 +326,91 @@ export async function GET(request) {
     const data_fine = searchParams.get('data_fine');
     const note = searchParams.get('note');
 
+    // 3. Il paziente deve essere sempre specificato
+    if (!id_paziente) {
+      return NextResponse.json(
+        { success: false, error: "ID paziente mancante." },
+        { status: 400 }
+      );
+    }
 
-    // Inizializza l'oggetto dei filtri per Prisma
-    const filtri = {};//RIVEDERE IL PERCHé UN OGGETTO é INIZZIALIZZATO CON UNA PARANTESI GRAFFA
+    // 4. Verifica i permessi di lettura sul paziente
+    const permission = await checkPatientPermission(
+      auth.userId,
+      id_paziente,
+      false
+    );
 
-    // Aggiunge il filtro per ID Terapia se fornito [cite: 12]
+    if (!permission.authorized) {
+      return NextResponse.json(
+        { success: false, error: "Non hai i permessi per visualizzare le terapie di questo paziente." },
+        { status: 403 }
+      );
+    }
+
+    // 5. Costruisce i filtri Prisma
+    // Il filtro del paziente è obbligatorio per impedire accessi globali
+    const filtri = {
+      id_paziente: id_paziente
+    };
+
     if (id_terapia) {
       filtri.id_terapia = id_terapia;
     }
 
-    // Aggiunge il filtro per ID Paziente se fornito [cite: 12]
-    if (id_paziente) {
-      filtri.id_paziente = id_paziente;
-    }
-
-    // Aggiunge il filtro per ID Farmaco nell'armadietto se fornito [cite: 12]
     if (id_farmaco_armadietto) {
       filtri.id_farmaco_armadietto = id_farmaco_armadietto;
     }
 
-    // Aggiunge il filtro per Nome Utilità (ricerca parziale case-insensitive) [cite: 12]
     if (nome_utilita) {
       filtri.nome_utilita = {
         contains: nome_utilita,
-        mode: 'insensitive',
+        mode: 'insensitive'
       };
     }
 
-    // Gestione dei parametri booleani: converte la stringa "true"/"false" in Boolean
-    // Filtro per terapie al bisogno [cite: 12]
     if (solo_al_bisogno !== null) {
       filtri.solo_al_bisogno = solo_al_bisogno === 'true';
     }
 
-    // Filtro per stato attività della terapia [cite: 13]
     if (terapia_attiva !== null) {
       filtri.terapia_attiva = terapia_attiva === 'true';
     }
 
-    // Filtro per data di inizio [cite: 13]
     if (data_inizio) {
       filtri.data_inizio = {
-        gte: new Date(data_inizio),
+        gte: new Date(data_inizio)
       };
     }
 
-    // Filtro per data di fine [cite: 13]
     if (data_fine) {
       filtri.data_fine = {
-        lte: new Date(data_fine),
+        lte: new Date(data_fine)
       };
     }
 
-    // Filtro per note [cite: 13]
     if (note) {
       filtri.note = {
         contains: note,
-        mode: 'insensitive',
+        mode: 'insensitive'
       };
     }
 
-
-
-    // Esegue la ricerca sul database con i filtri accumulati
+    // 6. Recupera i piani terapeutici autorizzati
     const pianiTerapeutici = await prisma.piano_terapeutico.findMany({
       where: filtri,
       include: {
-        // Include i dati del farmaco nell'armadietto [cite: 10, 12]
         farmaco: {
           include: {
-            // Include i dettagli tecnici del farmaco originale (nome, AIC, ditta) [cite: 3, 4, 10]
             farmaco: true
           }
         },
-        // Include l'elenco delle assunzioni programmate [cite: 14]
         assunzioni: true,
         assunzioni_passate: true
       }
     });
 
-    // Restituisce i risultati trovati (array vuoto se nessun match)
+    // 7. Restituisce i risultati
     return NextResponse.json({
       success: true,
       count: pianiTerapeutici.length,
@@ -295,24 +418,32 @@ export async function GET(request) {
     }, { status: 200 });
 
   } catch (error) {
-    // Logga l'errore per il debug lato server
     console.error("Errore durante la ricerca dinamica dei piani:", error);
 
-    // Restituisce un errore generico in caso di problemi tecnici
     return NextResponse.json({
       success: false,
-      error: 'Errore interno durante il recupero dei dati'
+      error: "Errore interno durante il recupero dei dati."
     }, { status: 500 });
   }
 }
+
 
 /**
  * GESTIONE PUT: Aggiorna un piano terapeutico esistente
  * @param {Request} request
  */
+
 export async function PUT(request) {
   try {
+    // 1. Verifica autenticazione
+    const auth = await getAuthenticatedUser();
+
+    if (auth.error) {
+      return auth.error;
+    }
+
     const body = await request.json();
+
     const {
       id_terapia,
       id_farmaco_armadietto,
@@ -323,81 +454,162 @@ export async function PUT(request) {
       data_inizio,
       data_fine,
       note,
-      orari // New field expected for schedule regeneration
+      orari
     } = body;
 
     if (!id_terapia) {
-      return NextResponse.json({ success: false, error: "ID terapia mancante" }, { status: 400 });
+      return NextResponse.json(
+        { success: false, error: "ID terapia mancante" },
+        { status: 400 }
+      );
     }
 
-    // 1. Fetch current therapy to handle state transitions and missing fields
+    // 2. Recupera la terapia esistente
     const currentTherapy = await prisma.piano_terapeutico.findUnique({
       where: { id_terapia },
-      select: { orari: true, solo_al_bisogno: true, terapia_attiva: true }
+      select: {
+        id_paziente: true,
+        orari: true,
+        solo_al_bisogno: true,
+        terapia_attiva: true
+      }
     });
 
     if (!currentTherapy) {
-        return NextResponse.json({ success: false, error: "Terapia non trovata" }, { status: 404 });
+      return NextResponse.json(
+        { success: false, error: "Terapia non trovata" },
+        { status: 404 }
+      );
     }
 
-    // Costruisci l'oggetto dei dati da aggiornare
+    // 3. Verifica i permessi di modifica
+    const permission = await checkPatientPermission(
+      auth.userId,
+      currentTherapy.id_paziente,
+      true
+    );
+
+    if (!permission.authorized) {
+      return NextResponse.json(
+        { success: false, error: "Non hai i permessi per modificare questa terapia." },
+        { status: 403 }
+      );
+    }
+
+    // 4. Se viene cambiato il farmaco, verifica che appartenga al paziente
+    if (id_farmaco_armadietto !== undefined) {
+      const farmaco = await prisma.farmaco_armadietto.findUnique({
+        where: {
+          id_farmaco_armadietto: id_farmaco_armadietto
+        },
+        select: {
+          id_utente_proprietario: true
+        }
+      });
+
+      if (!farmaco) {
+        return NextResponse.json(
+          { success: false, error: "Farmaco nell'armadietto non trovato." },
+          { status: 404 }
+        );
+      }
+
+      if (farmaco.id_utente_proprietario !== currentTherapy.id_paziente) {
+        return NextResponse.json(
+          { success: false, error: "Il farmaco selezionato non appartiene all'armadietto del paziente." },
+          { status: 403 }
+        );
+      }
+    }
+
+    // 5. Costruisce i dati da aggiornare
     const dataToUpdate = {};
 
-    // Aggiorna solo i campi presenti nel body
-    if (id_farmaco_armadietto !== undefined) dataToUpdate.id_farmaco_armadietto = id_farmaco_armadietto;
-    if (nome_utilita !== undefined) dataToUpdate.nome_utilita = nome_utilita;
+    if (id_farmaco_armadietto !== undefined) {
+      dataToUpdate.id_farmaco_armadietto = id_farmaco_armadietto;
+    }
+
+    if (nome_utilita !== undefined) {
+      dataToUpdate.nome_utilita = nome_utilita;
+    }
+
     if (dose_singola !== undefined) {
       const dose = parseFloat(dose_singola);
+
       if (isNaN(dose)) {
-        return NextResponse.json({ success: false, error: "Dose singola non valida" }, { status: 400 });
+        return NextResponse.json(
+          { success: false, error: "Dose singola non valida" },
+          { status: 400 }
+        );
       }
+
       dataToUpdate.dose_singola = dose;
     }
-    if (solo_al_bisogno !== undefined) dataToUpdate.solo_al_bisogno = Boolean(solo_al_bisogno);
-    if (terapia_attiva !== undefined) dataToUpdate.terapia_attiva = Boolean(terapia_attiva);
 
-    // Gestione date: accetta stringhe ISO o null
-    if (data_inizio !== undefined) dataToUpdate.data_inizio = data_inizio ? new Date(data_inizio) : null;
-    if (data_fine !== undefined) dataToUpdate.data_fine = data_fine ? new Date(data_fine) : null;
-    
-    if (note !== undefined) dataToUpdate.note = note;
+    if (solo_al_bisogno !== undefined) {
+      dataToUpdate.solo_al_bisogno = Boolean(solo_al_bisogno);
+    }
 
+    if (terapia_attiva !== undefined) {
+      dataToUpdate.terapia_attiva = Boolean(terapia_attiva);
+    }
 
-    // Aggiorna gli orari se forniti
-    if (orari !== undefined) dataToUpdate.orari = orari;
+    // Gestione date
+    if (data_inizio !== undefined) {
+      dataToUpdate.data_inizio = data_inizio ? new Date(data_inizio) : null;
+    }
 
-    // 2. Update the Therapy Plan
+    if (data_fine !== undefined) {
+      dataToUpdate.data_fine = data_fine ? new Date(data_fine) : null;
+    }
+
+    if (note !== undefined) {
+      dataToUpdate.note = note;
+    }
+
+    if (orari !== undefined) {
+      dataToUpdate.orari = orari;
+    }
+
+    // 6. Aggiorna il piano terapeutico
     const updatedTerapia = await prisma.piano_terapeutico.update({
       where: { id_terapia: id_terapia },
-      data: dataToUpdate,
+      data: dataToUpdate
     });
 
     const now = new Date();
     const startOfToday = new Date(now);
     startOfToday.setHours(0, 0, 0, 0);
 
-    // 3. LOGICA DI PAUSA (Attiva -> Disattiva)
-    // Se la terapia viene disattivata, cancelliamo le assunzioni future NON ancora confermate
-    if (currentTherapy.terapia_attiva === true && updatedTerapia.terapia_attiva === false) {
-        await prisma.registro_assunzioni.deleteMany({
-            where: {
-                id_terapia: id_terapia,
-                data_programmata: { gte: startOfToday },
-                esito: null // Cancella solo quelle pendenti
-            }
-        });
+    // 7. LOGICA DI PAUSA (Attiva -> Disattiva)
+    if (
+      currentTherapy.terapia_attiva === true &&
+      updatedTerapia.terapia_attiva === false
+    ) {
+      await prisma.registro_assunzioni.deleteMany({
+        where: {
+          id_terapia: id_terapia,
+          data_programmata: { gte: startOfToday },
+          esito: null
+        }
+      });
     }
 
-    // 4. Logica di Rigenerazione/Aggiornamento del Calendario (Inclusa Riattivazione)
-    // Determina i valori finali da usare (dal body o dal DB)
-    const finalOrari = orari !== undefined ? orari : currentTherapy.orari;
-    const finalSoloAlBisogno = solo_al_bisogno !== undefined ? Boolean(solo_al_bisogno) : currentTherapy.solo_al_bisogno;
-    
-    // Esegui se è attiva e non è al bisogno.
-    // Questo copre sia l'aggiornamento di orari, sia la riattivazione (False -> True)
-    if (Array.isArray(finalOrari) && !finalSoloAlBisogno && updatedTerapia.terapia_attiva) {
+    // 8. Rigenerazione e aggiornamento del calendario
+    const finalOrari = orari !== undefined
+      ? orari
+      : currentTherapy.orari;
 
-      // 1. Recupero assunzioni PENDING esistenti
+    const finalSoloAlBisogno = solo_al_bisogno !== undefined
+      ? Boolean(solo_al_bisogno)
+      : currentTherapy.solo_al_bisogno;
+
+    if (
+      Array.isArray(finalOrari) &&
+      !finalSoloAlBisogno &&
+      updatedTerapia.terapia_attiva
+    ) {
+      // Recupera le assunzioni future esistenti
       const existingPending = await prisma.registro_assunzioni.findMany({
         where: {
           id_terapia: id_terapia,
@@ -406,50 +618,59 @@ export async function PUT(request) {
         orderBy: { data_programmata: 'asc' }
       });
 
-      // 2. Calcolo dei nuovi orari desiderati
-      let generationStart = updatedTerapia.data_inizio && new Date(updatedTerapia.data_inizio) > startOfToday
-        ? new Date(updatedTerapia.data_inizio)
-        : startOfToday;
+      // Calcola i nuovi orari desiderati
+      let generationStart =
+        updatedTerapia.data_inizio &&
+        new Date(updatedTerapia.data_inizio) > startOfToday
+          ? new Date(updatedTerapia.data_inizio)
+          : startOfToday;
 
       let generationEnd = updatedTerapia.data_fine
         ? new Date(updatedTerapia.data_fine)
-        : new Date(generationStart.getTime() + 30 * 24 * 60 * 60 * 1000);
+        : new Date(
+            generationStart.getTime() + 30 * 24 * 60 * 60 * 1000
+          );
 
       const desiredIntakes = [];
       let iterDate = new Date(generationStart);
 
       while (iterDate <= generationEnd) {
-        // CORREZIONE: Costruiamo la stringa data usando i componenti locali 
-        // per evitare lo slittamento di un giorno dovuto a toISOString()
         const year = iterDate.getFullYear();
         const month = String(iterDate.getMonth() + 1).padStart(2, '0');
         const day = String(iterDate.getDate()).padStart(2, '0');
         const dateStr = `${year}-${month}-${day}`;
 
         for (const ora of finalOrari) {
-          // Usiamo l'ora locale. Se vuoi mantenere lo standard UTC nel DB:
           const scheduledTime = new Date(`${dateStr}T${ora}:00`);
           desiredIntakes.push(scheduledTime);
         }
+
         iterDate.setDate(iterDate.getDate() + 1);
       }
 
-      // 3. Sincronizzazione tramite Transazione
+      // 9. Sincronizzazione tramite transazione
       await prisma.$transaction(async (tx) => {
-        const maxIndex = Math.max(existingPending.length, desiredIntakes.length);
+        const maxIndex = Math.max(
+          existingPending.length,
+          desiredIntakes.length
+        );
 
         for (let i = 0; i < maxIndex; i++) {
           if (i < existingPending.length && i < desiredIntakes.length) {
-            // AGGIORNA senza eliminare
-            // Modifica solo se l'assunzione non è ancora stata confermata (esito === null)
+            // Aggiorna senza eliminare le assunzioni confermate
             if (existingPending[i].orario_effettivo === null) {
               await tx.registro_assunzioni.update({
-                where: { id_evento: existingPending[i].id_evento },
-                data: { data_programmata: desiredIntakes[i] }
+                where: {
+                  id_evento: existingPending[i].id_evento
+                },
+                data: {
+                  data_programmata: desiredIntakes[i]
+                }
               });
             }
+
           } else if (i < desiredIntakes.length) {
-            // CREA se mancano record
+            // Crea i record mancanti
             await tx.registro_assunzioni.create({
               data: {
                 id_terapia: id_terapia,
@@ -457,12 +678,14 @@ export async function PUT(request) {
                 esito: null
               }
             });
+
           } else if (i < existingPending.length) {
-            // ELIMINA solo se in eccesso
-            // Elimina solo se l'assunzione non è ancora stata confermata (esito === null)
+            // Elimina soltanto le assunzioni pendenti in eccesso
             if (existingPending[i].esito === null) {
               await tx.registro_assunzioni.delete({
-                where: { id_evento: existingPending[i].id_evento }
+                where: {
+                  id_evento: existingPending[i].id_evento
+                }
               });
             }
           }
@@ -478,38 +701,103 @@ export async function PUT(request) {
 
   } catch (error) {
     console.error("Errore aggiornamento terapia:", error);
-    return NextResponse.json({ success: false, error: "Errore durante l'aggiornamento" }, { status: 500 });
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Errore durante l'aggiornamento"
+      },
+      { status: 500 }
+    );
   }
 }
+
 
 /**
  * GESTIONE DELETE: Rimuove un piano terapeutico
  * @param {Request} request - URL con parametro ?id_terapia=...
  */
+
 export async function DELETE(request) {
   try {
-    // Estrae l'ID della terapia dall'URL
+    // 1. Verifica autenticazione
+    const auth = await getAuthenticatedUser();
+
+    if (auth.error) {
+      return auth.error;
+    }
+
+    // 2. Estrae l'ID della terapia
     const { searchParams } = new URL(request.url);
     const idTerapia = searchParams.get('id_terapia');
 
-    // Validazione dell'ID terapia [cite: 12]
     if (!idTerapia) {
-      return NextResponse.json({ error: 'ID terapia mancante' }, { status: 400 });
+      return NextResponse.json(
+        { success: false, error: "ID terapia mancante." },
+        { status: 400 }
+      );
     }
 
-    // Elimina il record dalla tabella piano_terapeutico [cite: 12]
-    await prisma.piano_terapeutico.delete({
+    // 3. Recupera la terapia e il paziente proprietario
+    const terapia = await prisma.piano_terapeutico.findUnique({
       where: {
-        id_terapia: idTerapia,
+        id_terapia: idTerapia
       },
+      select: {
+        id_paziente: true
+      }
     });
 
-    // Conferma l'avvenuta eliminazione
-    return NextResponse.json({ message: 'Piano terapeutico eliminato con successo' }, { status: 200 });
+    if (!terapia) {
+      return NextResponse.json(
+        { success: false, error: "Terapia non trovata." },
+        { status: 404 }
+      );
+    }
+
+    // 4. Verifica i permessi di modifica
+    const permission = await checkPatientPermission(
+      auth.userId,
+      terapia.id_paziente,
+      true
+    );
+
+    if (!permission.authorized) {
+      return NextResponse.json(
+        { success: false, error: "Non hai i permessi per eliminare questa terapia." },
+        { status: 403 }
+      );
+    }
+
+    // 5. Elimina il piano terapeutico
+    await prisma.piano_terapeutico.delete({
+      where: {
+        id_terapia: idTerapia
+      }
+    });
+
+    // 6. Conferma l'eliminazione
+    return NextResponse.json({
+      success: true,
+      message: "Piano terapeutico eliminato con successo"
+    }, { status: 200 });
 
   } catch (error) {
     console.error("Errore eliminazione piano:", error);
-    // Errore 500 se ad esempio ci sono assunzioni collegate che impediscono la cancellazione
-    return NextResponse.json({ error: 'Impossibile eliminare il piano terapeutico' }, { status: 500 });
+
+    if (error.code === 'P2025') {
+      return NextResponse.json(
+        { success: false, error: "Terapia non trovata." },
+        { status: 404 }
+      );
+    }
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Impossibile eliminare il piano terapeutico."
+      },
+      { status: 500 }
+    );
   }
 }

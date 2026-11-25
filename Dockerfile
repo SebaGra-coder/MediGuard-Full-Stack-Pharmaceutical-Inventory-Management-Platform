@@ -1,23 +1,24 @@
-# Usa un'immagine base leggera di Node.js
+
 FROM node:20-alpine
 
-# Imposta la cartella di lavoro dentro il container
 WORKDIR /app
 
-# Copia i file delle dipendenze
-COPY package*.json ./
+# Installa OpenSSL, necessario per Prisma
+RUN apk add --no-cache openssl
 
 # Installa le dipendenze
-RUN npm install
+COPY package*.json ./
+RUN npm ci
 
-# Copia tutto il resto del codice
+# Copia il progetto
 COPY . .
 
-# Costruisce l'app per la produzione
+# Genera Prisma Client
+RUN npx prisma generate
+
+# Compila Next.js
 RUN npm run build
 
-# Espone la porta 3000 (dove gira Next.js)
 EXPOSE 3000
 
-# Comando per avviare l'app
 CMD ["npm", "start"]

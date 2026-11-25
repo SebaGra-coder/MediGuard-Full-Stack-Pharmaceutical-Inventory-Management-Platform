@@ -1,8 +1,88 @@
-// route.js
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
+import jwt from 'jsonwebtoken';
+import { prisma } from '@/lib/prisma';
 
-export const dynamic = "force-dynamic";
+async function getAuthenticatedUser() {
+  const cookieStore = await cookies();
+  const token = cookieStore.get('session_token');
+
+  if (!token) {
+    return {
+      error: NextResponse.json(
+        { success: false, error: 'Autenticazione richiesta.' },
+        { status: 401 }
+      )
+    };
+  }
+
+  try {
+    const secret = process.env.JWT_SECRET;
+
+    if (!secret) {
+      throw new Error('JWT_SECRET non configurato');
+    }
+
+    const decoded = jwt.verify(token.value, secret);
+
+    if (!decoded.id) {
+      throw new Error('Token senza ID utente');
+    }
+
+    const user = await prisma.utente.findUnique({
+      where: { id_utente: decoded.id },
+      select: { id_utente: true }
+    });
+
+    if (!user) {
+      return {
+        error: NextResponse.json(
+          { success: false, error: 'Utente non trovato.' },
+          { status: 401 }
+        )
+      };
+    }
+
+    return { userId: user.id_utente };
+
+  } catch (error) {
+    return {
+      error: NextResponse.json(
+        { success: false, error: 'Sessione non valida.' },
+        { status: 401 }
+      )
+    };
+  }
+}
+
+async function checkCabinetPermission(userId, patientId, requireWrite = false) {
+  if (userId === patientId) {
+    return { authorized: true, permission: 'OWNER' };
+  }
+
+  const relazione = await prisma.relazione.findFirst({
+    where: {
+      id_caregiver: userId,
+      id_assistito: patientId
+    },
+    select: {
+      permessi_armadietto: true
+    }
+  });
+
+  if (!relazione || relazione.permessi_armadietto === 'NIENTE') {
+    return { authorized: false };
+  }
+
+  if (requireWrite && relazione.permessi_armadietto !== 'ADMIN') {
+    return { authorized: false };
+  }
+
+  return {
+    authorized: true,
+    permission: relazione.permessi_armadietto
+  };
+}
 
 /**
  * PUT → Aggiorna quantità, data di scadenza e registra note
@@ -11,7 +91,9 @@ export const dynamic = "force-dynamic";
 export async function PUT(request) {
   try {
     let body;
-    
+
+    const auth = await getAuthenticatedUser();
+    if (auth.error) return auth.error;
     // 1. Controllo Parsing JSON
     try {
       body = await request.json();
@@ -24,7 +106,7 @@ export async function PUT(request) {
     }
 
     const {
-      id_farmaco_armadietto, 
+      id_farmaco_armadietto,
       quantita_rimanente,
       data_scadenza,
     } = body;
@@ -49,6 +131,7 @@ export async function PUT(request) {
     const record = await prisma.farmaco_armadietto.findUnique({
       where: { id_farmaco_armadietto: id_farmaco_armadietto },
       select: {
+        id_utente_proprietario: true,
         id_farmaco_armadietto: true,
         quantita_rimanente: true,
         data_scadenza: true
@@ -62,19 +145,32 @@ export async function PUT(request) {
       );
     }
 
+    const permission = await checkCabinetPermission(
+      auth.userId,
+      record.id_utente_proprietario,
+      true
+    );
+
+    if (!permission.authorized) {
+      return NextResponse.json(
+        { success: false, error: 'Non autorizzato ad aggiornare questo farmaco.' },
+        { status: 403 }
+      );
+    }
+
     const dataToUpdate = {};
-    
+
     // 5. Validazione Approfondita Quantità
     if (quantita_rimanente !== undefined) {
       const qty = parseFloat(quantita_rimanente);
-      
+
       if (isNaN(qty)) {
         return NextResponse.json(
           { success: false, error: "Il valore di 'quantita_rimanente' non è un numero valido" },
           { status: 400 }
         );
       }
-      
+
       if (qty < 0) {
         return NextResponse.json(
           { success: false, error: "La quantità non può essere negativa" },
@@ -101,12 +197,12 @@ export async function PUT(request) {
 
       // Check logico: date passate
       const isSameDate = record.data_scadenza && record.data_scadenza.getTime() === parsedDate.getTime();
-      
+
       if (!isSameDate && parsedDate < oggi) {
         return NextResponse.json(
-          { 
-            success: false, 
-            error: "La data di scadenza non può essere precedente a oggi", 
+          {
+            success: false,
+            error: "La data di scadenza non può essere precedente a oggi",
             debug_info: { fornita: parsedDate.toISOString(), oggi: oggi.toISOString() }
           },
           { status: 400 }
@@ -145,26 +241,26 @@ export async function PUT(request) {
     let errorDetails = error.message;
 
     if (error.code) {
-        switch (error.code) {
-            case 'P2025':
-                errorMessage = "Record da aggiornare non trovato (concorrenza o ID errato)";
-                break;
-            case 'P2002':
-                errorMessage = "Violazione vincolo di unicità";
-                break;
-            case 'P2003':
-                errorMessage = "Violazione vincolo chiave esterna (ID non valido)";
-                break;
-            default:
-                errorMessage = `Errore Database: ${error.code}`;
-        }
+      switch (error.code) {
+        case 'P2025':
+          errorMessage = "Record da aggiornare non trovato (concorrenza o ID errato)";
+          break;
+        case 'P2002':
+          errorMessage = "Violazione vincolo di unicità";
+          break;
+        case 'P2003':
+          errorMessage = "Violazione vincolo chiave esterna (ID non valido)";
+          break;
+        default:
+          errorMessage = `Errore Database: ${error.code}`;
+      }
     }
 
-    return NextResponse.json({ 
-      success: false, 
-      error: errorMessage, 
+    return NextResponse.json({
+      success: false,
+      error: errorMessage,
       raw_error: errorDetails,
-      code: error.code 
+      code: error.code
     }, { status: 500 });
   }
 }
@@ -174,6 +270,8 @@ export async function PUT(request) {
  */
 export async function GET(request) {
   try {
+    const auth = await getAuthenticatedUser();
+    if (auth.error) return auth.error;
     const { searchParams } = new URL(request.url);
     const id_farmaco_armadietto = searchParams.get("id_farmaco_armadietto");
 
@@ -187,6 +285,7 @@ export async function GET(request) {
     const record = await prisma.farmaco_armadietto.findUnique({
       where: { id_farmaco_armadietto: id_farmaco_armadietto },
       select: {
+        id_utente_proprietario: true,
         quantita_rimanente: true,
         data_scadenza: true,
         farmaco: {
@@ -204,6 +303,20 @@ export async function GET(request) {
         { status: 404 }
       );
     }
+
+    const permission = await checkCabinetPermission(
+      auth.userId,
+      record.id_utente_proprietario
+    );
+
+    if (!permission.authorized) {
+      return NextResponse.json(
+        { success: false, error: 'Non autorizzato a visualizzare questo farmaco.' },
+        { status: 403 }
+      );
+    }
+
+    delete record.id_utente_proprietario;
 
     return NextResponse.json({
       success: true,
